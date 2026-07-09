@@ -1,0 +1,541 @@
+---
+title: "Applying Landmarking Methods for Predictive Health"
+author: "Alex Lapadat"
+date: "2026-05-13"
+date-format: iso
+format:
+  pdf:
+    code-overflow: wrap
+editor: source
+toc: true
+bibliography: refs.bib
+bibliographystyle: chicago
+---
+
+```{r}
+#| label: setup
+#| include: false
+set.seed(1)
+library(mosaic)   
+library(tidyverse)
+library(survival)
+library(ggsurvfit)
+library(Landmarking)
+library(knitr)
+library(kableExtra)
+
+knitr::opts_chunk$set(
+  fig.pos = "H",
+  table.placement = "H",
+  fig.align = "center"
+)
+```
+
+
+\newpage
+
+## Introduction and Goals
+
+What if one day you walk into a doctor's office and, after giving them access to your medical history from the past five years, you are given personalized estimates of future health risks, along with fitting dietary and lifestyle recommendations that would lead to the best possible health outcome? This idea is connected to dynamic prediction, a survival analysis technique in which an individual's future survival probabilities are updated as new information becomes available [@leroux:2018]. In medical research, dynamic prediction employs time-dependent predictor variables extracted from repeated measurements in longitudinal health records. Take, for instance, a person who starts displaying symptoms of Parkinson's Disease, a debilitating neurodegenerative condition that eventually leads the patient to require long-term caregiving. After creating a predictive model and incorporating the patient's scores on the Unified Parkinson's Disease Rating Scale (UPDRS), health providers can assess and update, over time and as more information comes in, the patient's risk of developing a major motor disability until a specified horizon time. The horizon time is the fixed point in the future by which the estimate is calculated. Now, with awareness of these future risks, the patient can make informed decisions early, such as which physical activity programs to pursue or which medical support to contact.
+
+Predictive work raises valid and realistic ethical concerns, ranging from privacy leaks, to the associated risks of health-related discrimination and even the psychological impact of knowing what future health difficulties await someone. At the same time, dynamic prediction opens the door to a new era of preventive medicine. By implementing this method, patients could gain time to prepare themselves and their support networks to confront diseases they would otherwise be ill-equipped and scared to face.
+
+Several types of dynamic analyses exist; each method follows various asumptions and is constructed differently depending on the goals of the statistician. The most common ones are the extended Cox model, landmarking, and joint modeling. The extended Cox model is one of the simpler options; within it, covariates are allowed to change over time, and each time point of interest uses the observed covariates at that specific time point. However, this type of model does not account for covariate evolution, i.e., the rate at which variables change over time [@zhang:2018]. It only captures the person's current state, not their trajectory. For example, two patients may have the same UPDRS score at time t and, under the extended Cox model, be assigned the same risk over the next 2 years. However, the model does not account for the fact that one individual has consistently obtained the same score for the past 6 months, while the other individual experienced a drastic increase in their scores over the same period. The progression of the disease provides important, personalized information about each patient, and relying on the Cox model fails to capture this information. Another, more complex approach is joint modeling, in which the longitudinal disease trajectory obtained from the repeated measures is modeled simultaneously with the survival outcomes, which rely on the time-to-event data. This technique addresses the issue of the extended Cox model. Therefore, the risk of developing major motor disability will be greater for the patient who experienced an abrupt increase in the USPDR score, as the model accounts for how the disease has progressed over time.
+
+The survival analysis method this paper delves into is landmarking, which also dynamically predicts an individual's specific risk of an event occurring using continuously updated longitudinal data. In this type of analysis, landmark time points are established, and predictions are made solely using individuals at risk at those specific time points. Landmarking is advantageous over joint modeling, as it requires fewer computational resources and is easier to implement [@hossain:2022]. Furthermore, it has benefits over the extended Cox model, as it imposes a less stringent proportional hazards assumption [@barrott:2022], assuming that the hazard ratio for time-dependent covariates is proportional only over the period between the landmark time and the prediction horizon, rather than over the complete study period [@pusarla:2025].
+
+Within this paper, we will analyze the features of the Landmarking R package created by @barrott:2022. This package is highly customizable, allowing users to adapt the code and model specifications to the needs of the data being analyzed. Landmarking generally works in a two-stage process. In the first stage, a longitudinal model is created that takes as input the repeated patient measurements data, models how these values evolve up to the landmark time, and outputs a summarized patient history as a single predictor: the estimated patient status at the established landmark time. In the second stage of the landmarking approach, the survival model is created using information from Stage 1 and non-time-dependent predictors (e.g., ethnicity) to estimate the risk of an event occurring after the landmark time. In this project, the focus will be two-folded, of analyzing the longitudinal model in the first stage and the survival submodel that the package can employ in the second stage. For the second stage, there are three current options: the standard Cox model and two competing-risks models, the Fine-Gray model and the cause-specific model. The Exposition of the Method section provides details on the theory underlying the Landmarking technique, including the assumptions on which it is based and its advantages over other methods. The Methods section includes applied code from the R package, explained at every step, to familiarize potential users with the differences among several feature choices, alongside a general description of the dataset. In the Results section, four models of interest are compared using predictive modeling evaluation metrics, and the predictive results and hazard ratios are interpreted for a hypothetical patient. 
+
+
+## Exposition of Method
+
+A key advantage of Landmarking is its ability to account for time-based changes while also avoiding immortal time bias [@barrott:2022], which is the central reason why this method was created by @anderson:1983, when studying the effectiveness of cancer chemotherapy treatment. Immortal time bias refers to a period during which the event of interest cannot occur, because the participants must necessarily survive until they receive the treatment or are allocated to a certain group to be included. @gleiss:2018 offers a clear example that focuses on kidney transplant surgery and its connection to mortality rates, where patients are separated between two groups depending on whether they experienced graft failure ot not. Unexpectedly, in the naïve analysis, the two groups appeared to have similar mortality rates. However, a major misclassification occurred: graft failure was treated as if it had been known from the beginning of the study, even though it was analyzed during follow-up. Therefore, the patients in this group had to survive long enough to experience the failure, leading to a period of "immortal time". Landmarking resolves the issue by defining two specific time points at 30 and 60 months. At each specific time point, only people who are event-free until then are included in the study. This approach showed that, as clinically expected, people who experienced graft failures had higher mortality rates than those who didn't. In the upper part of @fig-1, an example of immortal time bias is depicted, in which predictions are made from the baseline using unknown future information as a given. The lower part of @fig-1 depicts how landmarking addresses this problem by using information only up until a certain point when predicting risks. As information is updated, so are the models, with a new model being trained at each landmark time point. 
+
+```{r}
+#| label: fig-1
+#| echo: false
+#| fig-cap: "Example of how Landmarking avoids Immortal Time Bias, adapted from Bounthavong (2024)"
+knitr::include_graphics("background/immortal_time.png")
+```
+
+One challenge in longitudinal data analysis is handling missing data in repeated measurements. Consider a practical example: we want to assess a patient's risk of cancer over the next five years using their medical history. While reviewing their files, we noticed that the patient had not completed some clinical tests for one of the longitudinal predictors. The data from this series of tests would be incredibly useful, and we would not want to give up on a predictor that provides useful information in the model, so we must figure out a way to fill that gap. The Landmarking package illustrates two options that address this gap during the first longitudinal model-building stage.
+
+The Last Observation Carried Forward (LOCF) method is simpler and uses the last measurements for each patient to fill in gaps. If a predictor value is missing at the chosen landmark time, the most recent measurement will be used instead. Therefore, when this option is chosen, it is not a true longitudinal model, as only the last observed value of the biomarker is fed into the survival model.
+
+On the other hand, the Linear Mixed Effects (LME) method fits a mixed-effects model using the existing longitudinal dataset values to estimate the trajectory of the predictor over time, rather than merely filling the gaps. Then, the best linear unbiased predictions (BLUPs) for the landmark time of choice are extracted, which is the information regarding the biomarker that gets transmitted to the second stage. Using an LME model instead of a linear model ensures that repeated measurements from the same patient are correlated [@barrott:2022].
+
+Within the Landmarking package, the second stage of the technique, which involves the survival model, can be performed using either a standard Cox model or a competing-risks model, either the cause-specific model or the Fine-Gray model. Competing risks refers to survival analysis situations where multiple types of events that do not involve censoring can occur, but experiencing one type of event impedes others from occurring [@kleinbaum:1996]. For example, when calculating the survival probabilities of people who are diagnosed with cancer, death from other diseases becomes a competing risk to the event of interest in the study. 
+
+The standard Cox model does not accommodate competing risks, so only a single event can be treated as an outcome, and any other events must be treated as censoring. However, in some situations, this choice can violate the assumption of non-informative censoring. This type of model displays the risk of an event occurring when nothing else interferes. The formula for the Cox Proportional Hazards Model can be found below:
+
+$$\lambda(t|\mathbf{Z}_i) = \lambda_0(t)\exp\left(\sum_{j=1}^{p} \beta_j Z_{ij}\right)$$, where: 
+
+* $\lambda(t|\mathbf{Z}_i)$ represents the hazard function, which is the instantaneous rate of the event of interest occurring at time $t$ ($t$ between the landmark time and the horizon time), given survival up to landmark time, where other events are treated as censored;
+
+* $\lambda_0(t)$ represents the baseline hazard, which is the hazard when all the covariates are equal to 0;
+
+* $\beta_j$ represents the regression coefficient for covariate $j$ measured at the landmark time;
+
+* $Z_{ij}$ represents the value of covariate $j$ for individual $i$ at the landmark time.
+
+The cause-specific competing-risks model functions similarly to a Cox model, as it creates a separate Cox model for each cause. Within each model, the other events are treated as censored. One potential issue that has to be taken into consideration is that it can violate the assumption of independence of censored data [@kleinbaum:1996]. This model allows the analysis of the risk of each specific event type separately from the others, making it suitable for analysis of the etiology of the disease [@morita:2021]. The equation for the cause-specific model can be found below:
+
+$$\lambda_c(t|\mathbf{Z}_i) = \lambda_{0c}(t)\exp\left(\sum_{j=1}^{p} \beta_{jc} Z_{ij}\right)$$, where: 
+
+* $\lambda_c(t|\mathbf{Z}_i)$ represents the cause-specific hazard function for cause $c$, which is the instantaneous rate of the event occurring due to cause $c$ at time $t$ ($t$ between the landmark time and the horizon time), given the individual has not yet experienced another event, nor been censored by the landmark time;
+
+* $\lambda_{0c}(t)$ represents the baseline cause-specific hazard for cause $c$, which is the hazard when all covariates measured at the landmark time are equal to 0;
+
+* $\beta_{jc}$ represents the regression coefficient for covariate $j$ for cause $c$, allowing the effect of each covariate measured at the landmark time to differ by cause;
+
+* $Z_{ij}$ represents the value of covariate $j$ for individual $i$ at the landmark time.
+
+
+Meanwhile, the Fine-Gray model diverges from the other two options by modelling the subdistribution hazard - the instantaneous rate of a specific event occurring in the presence of competing risks - where individuals who experience a competing event are retained in the risk set. The subdistribution hazard is directly linked to the cumulative incidence function (CIF), which represents the absolute probability of an event occurring by a given horizon time in the presence of competing risks [@austin:2021]. @morita:2021 argues this method is useful specifically for predicting an individual’s risk. The equation below gives the formula for the subdistribution hazard:
+
+
+$$\tilde{\lambda}_c(t|\mathbf{Z}_i) = \tilde{\lambda}_{0c}(t)\exp\left(\sum_{j=1}^{p} \gamma_{jc} Z_{ij}\right)$$, where:
+
+* $\tilde{\lambda}_c(t|\mathbf{Z}_i)$ represents the subdistribution hazard function for cause $c$, which is the instantaneous rate of the event occuring due to cause $c$ at time $t$ ($t$ between the landmark time and the horizon time), given the individual had not yet experienced the cause $c$ event or has been censored by the landmark time, but with individuals who experienced the competing events retained in the risk set;
+
+* $\tilde{\lambda}_{0c}(t)$ represents the baseline subdistribution hazard for cause $c$, which is the hazard when all covariates measured at the landmark time are equal to 0;
+
+* $\gamma_{jc}$ represents the regression coefficient for covariate $j$ for cause $c$, which is connected to the cumulative incidence of cause $c$;
+
+* $Z_{ij}$ represents the value of covariate $j$ for individual $i$ at the landmark time.
+
+
+## Method 
+
+### Simulated Dataset Description
+
+This study employed a simulated dataset of longitudinal cardiovascular disease (CVD) risk factor measurements and time-to-event data for 3000 patients. The primary event of interest was death from cardiovascular disease, such as stroke and heart attack. In contrast, the competing risk was represented by death from any other causes except cardiovascular-related ones, such as cancer. The objective of this analysis was to assess the 5-year risk of cardiovascular disease at age 60. 
+
+At first, @barrott:2022 fit a linear mixed-effects model to real-world data from the PREDICT Cardiovascular Disease Cohort obtained from primary care practices in New Zealand [@predict:2017]. Then, using the model's parameters, the repeated-measurement components were generated for 3000 patients, each with measurements taken at multiple ages. These longitudinal covariates included standardized systolic blood pressure (SBP) and standardized total cholesterol-to-HDL ratio (TC/HDL).
+
+A cause-specific model was fit to the time-to-event data obtained from primary care practices in New Zealand. Then, the simulated patients' SBP and TC/HDL information were extracted at age 60, and together with the other covariates (ethnicity, diabetes status, smoking status), these predictors were used to simulate time-to-event outcomes for the 3000 patients using the survival model's parameters. 
+
+The dataset contains the variables of interest displayed in @tbl-1. The biomarkers are standardized, so a value of 0.1 means that the patient has a biomarker value of 0.1 standard deviations above the population mean. Among all subjects, as shown in @tbl-2, 61% were reported as European, 11% as Asian, 11% as NZ Maori, and 10% as Pacific Islanders, with only 7% reported as Indian. No other ethnicities were reported in the dataset. Seventy-two percent of the participants were reported as non-smokers, and 16% and 12% as previous smokers, respectively, current smokers. About 13% of the simulated population had been diagnosed with diabetes. Out of the 3000 unique patients in the dataset, 2538 were censored, 429 died from CVD, and 33 died from other reasons. In @fig-2, the distributions of age at the time of the events are shown for the three event types. In the longitudinal dataset, there were 9031 repeated-measurement observations, with approximately 3 (IQR: 2-4) measurements per patient.
+
+The chosen landmark time was 60, as the event data were simulated for individuals at age 60, where the models were expected to perform best. The horizon time was 65, as the goal was to analyze the 5-year risk of cardiovascular disease. 
+
+```{r}
+#| include: false
+load("data-raw/data_repeat_outcomes.rda")
+dim(data_repeat_outcomes)
+table(unique(data_repeat_outcomes[,c("id","event_status")])[,"event_status"])
+```
+
+
+```{r}
+#| label: tbl-1
+#| echo: false
+#| tbl-cap: "Table of Terms and their Definitions"
+
+table_data_dictionary <- data.frame(
+  Variable = c(
+    "id", "ethnicity", "diabetes", "smoking", "sbp_stnd", "tchdl_stnd",
+    "response_time_sbp_stnd", "response_time_tchdl_stnd", "event_status", 
+    "event_time"
+  ),
+  
+  Definition = c(
+    "Patient ID",
+    "Ethnicity: NZ Māori, Pacific, Asian, European, Indian",
+    "Diabetes status: 0 = no diagnosis, 1 = diagnosis",
+    "Smoking status: 0 = never smoked, 1 = previously smoked (quit), 2 = current smoker",
+    "Standardised systolic blood pressure (repeated measure)",
+    "Standardised total cholesterol to HDL ratio (repeated measure)",
+    "Age at which ethnicity, smoking, diabetes, and SBP were recorded",
+    "Age at which standardised TC/HDL was recorded (within one month of other variables)",
+    "Event status: 0 = censored, 1 = CVD-related death, 2 = non-CVD death",
+    "Age at which the event occurred"
+  )
+)
+
+table_data_dictionary |>
+  kable(col.names = c("Variable", "Definition")) |>
+  kable_styling(latex_options = c("hold_position"),
+                full_width    = FALSE,
+                font_size     = 9,
+                bootstrap_options = c("striped", "hover", "condensed")) |>
+  column_spec(1, bold = TRUE, monospace = TRUE)
+```
+
+
+```{r}
+#| label: tbl-2
+#| echo: false
+#| tbl-cap: "Participant Characteristics"
+
+data_repeat_outcomes %>%
+  distinct(id, ethnicity) %>%
+  count(ethnicity, sort = TRUE) %>%
+  mutate(
+    ethnicity  = case_match(ethnicity,
+                            "Chinese_other_asian" ~ "Asian",
+                            .default = ethnicity),
+    percentage = round(n / sum(n) * 100, 1)
+  ) %>%
+  kable(col.names = c("Ethnicity", "Count", "%")) |>
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+```
+
+
+```{r}
+#| label: fig-2
+#| echo: false
+#| fig-cap: "Distribution of Age at Event"
+
+data_repeat_outcomes %>%
+  distinct(id, event_status, event_time) %>%
+  mutate(event_label = recode(event_status,
+    `0` = "Censored", `1` = "CVD death", `2` = "Non-CVD death"
+  )) %>%
+  ggplot(aes(x = event_time, fill = event_label)) +
+  geom_histogram(bins = 40, color = "white") +
+  scale_fill_manual(values = c("Censored" = "#888780", "CVD death" = "#378ADD", "Non-CVD death" = "#D85A30")) +
+  labs(x = "Age at Event (years)", y = "Count", fill = NULL) +
+  theme_minimal() +
+  theme(legend.position = "top")
+```
+
+
+### Stage I: LOCF vs LME
+
+The code below displays how both the LOCF and LME methods were implemented in the first stage of the Landmarking method. The **fit_LOCF_landmark** and **fit_LME_landmark** functions directly perform the two-stage landmarking analysis, with the first using LOCF and the second using LME. As observed, the arguments used differ, with the LME method appearing more complex. For the LOCF version, the **covariates** contain all variables of interest used as independent variables in the survival model, and **covariates_time** contains the times at which the covariates were recorded. As in the model presented below, the recording times can differ, as long as the specific time variable is assigned to each covariate. Meanwhile, in the LME version, the variables are split into two categories with vastly different roles. The **responses_LME** contains the repeated-measurement variables that are to be predicted from the variables in **predictors_LME** using the LME model in the first stage. Thus, the variables in **responses_LME** will be those with BLUPs extracted at the landmark time point and used in the survival model. Furthermore, the LOCF of the variables in **predictors_LME** are also used as covariates within the survival model, giving them a double role. 
+
+By setting **x_L** to 60, only individuals who are still in the risk set at that landmark time are retained, so people who experienced the event or were censored before 60 years old are not included. The survival submodel chosen for both examples was the Fine-Gray model to allow comparison of the first-stage methods. In addition, we created a medical history for a hypothetical patient and checked their predicted risk using LOCF and LME, which is displayed in the Results section. The patient's ID is 101; they identify as NZ Maori, and they had clinical tests at ages 50, 54, and 60. We intentioanlly set the SBP value as missing when the patient is 60 years-old. This is where the differences between the LOCF and the LME model come in. In the LOCF model, at age 60, the patient will receive an SBP value of 0.1, equal to the value measured at age 54. Therefore, the last observed value is being carried forward. Meanwhile, for LME, the model would estimate the SBP value at age 60 internally, using the other predictors (ethnicity, smoking, and diabetes). 
+
+The warning that appears after running the code indicates that 887 individuals were removed from the risk set because they were no longer eligible to remain in the study at age 60. That is because they had already experienced one of the events, or were censored before the landmark time. The **predict** function was used to find the probability of the event happening for a particular individual.
+
+
+```{r}
+#| message: false
+data_model_landmark_LOCF <-
+  fit_LOCF_landmark(
+    data_long = data_repeat_outcomes,
+    x_L = c(60), # Landmark time = 60 years old
+    x_hor = c(65), # Prediction horizon = 65 years old
+    
+    # All the predictors used in the survival model
+    covariates = c("ethnicity", "smoking", "diabetes", 
+                   "sbp_stnd", "tchdl_stnd"), 
+    # The times the predictors were measured at
+    covariates_time = c(rep("response_time_sbp_stnd", 4), 
+                        "response_time_tchdl_stnd"), 
+    individual_id = "id",
+    
+    event_time = "event_time", 
+    event_status = "event_status",
+    survival_submodel = "fine_gray",
+    b = 250,
+  )
+
+data_model_landmark_LME <-
+  fit_LME_landmark(
+    data_long = data_repeat_outcomes,
+    x_L = c(60),
+    x_hor = c(65),
+
+    # The predictors used in the first and second-stage of landmarking
+    predictors_LME = c("ethnicity", "smoking", "diabetes"), 
+    predictors_LME_time = "response_time_sbp_stnd",
+    # The repeated measurements variables that have their BLUPs calculated 
+    responses_LME = c("sbp_stnd", "tchdl_stnd"), 
+    responses_LME_time = c("response_time_sbp_stnd", 
+                           "response_time_tchdl_stnd"),
+
+    individual_id = "id",
+    standardise_time = TRUE,
+    lme_control = nlme::lmeControl(maxIter = 100, msMaxIter = 100),
+
+    event_time = "event_time",
+    event_status = "event_status",
+    survival_submodel = "fine_gray",
+    b = 250,
+  )
+
+newdata <- data.frame(
+  id = c(101, 101, 101),
+  response_time_sbp_stnd = c(50, 54, 60),
+  response_time_tchdl_stnd = c(50, 54, 60),
+  sbp_stnd = c(-0.3, 0.1, NA), # Missing biomarker at age 60
+  tchdl_stnd = c(0.2, 0.3, 0.5),
+  ethnicity = c("NZMaori", "NZMaori", "NZMaori"),
+  smoking = c(1 ,1 ,1 ), # Previous smoker
+  diabetes = c(1, 1, 1) # Not diagnosed with diabetes
+) 
+```
+
+
+### Stage II: The Survival Submodels
+
+Because the repeated-measurement data were simulated using LME, the longitudinal model in the first stage was created using LME, as it fits the data better than the LOCF model would. In the second stage, we ran three separate survival submodels: the standard Cox model, the cause-specific Cox model, and the Fine-Gray regression model. 
+
+We then assessed the performance of the submodels by comparing their prediction accuracy, measured through the Brier score, which quantifies how close predicted probabilities are to observed outcomes, and the c-index, which measures the model's discrimination, or how well it ranks patients by risk. Furthermore, using the argument **b=250**, we ran bootstrap resampling to obtain standard errors for the c-index and Brier score, to assess model reliability by analyzing the uncertainty of the estimates. 
+
+We expected the cause-specific model to perform considerably better than the other two models on the concordance index and Brier score, as the dataset's time-to-event outcomes were simulated using a cause-specific survival model. 
+
+The code below contains a standard Cox model example. Before running the **fit_LME_landmark** function, the 33 people who died from non-CVD causes had to be censored instead, as the model cannot support competing risks. To do that, another variable - **event_status_binary** - was created. For the competing-risks models, the regular **event_status** term was used, which includes censoring and both types of death.
+
+The standard Cox model estimates the instantaneous rate of CVD death within the 5-year window following landmark age 60, treating non-CVD deaths as censored occasions. The cause-specific Cox model similarly estimates the rate of CVD death within 5 years, but models it only among individuals who are not censored, and who have not yet died from any cause. This way, competing risk deaths are taken out of the risk set. Meanwhile, the Fine-Gray model directly calculates the probability of CVD death in the presence of the competing risk of non-CVD death, with people who experience the competing event retained in the risk set.
+
+
+```{r}
+#| message: false
+#| warning: false
+data_repeat_outcomes <- data_repeat_outcomes |>
+  mutate(event_status_binary = as.numeric(as.character(event_status)),
+         event_status_binary = if_else(event_status_binary == 2, 0, 
+                                       event_status_binary))
+
+data_model_cox <-
+  fit_LME_landmark(
+    data_long = data_repeat_outcomes,
+    x_L = c(60), 
+    x_hor = c(65),
+
+    predictors_LME = c("ethnicity", "smoking", "diabetes"),
+    predictors_LME_time = "response_time_sbp_stnd",
+    responses_LME = c("sbp_stnd", "tchdl_stnd"),
+    responses_LME_time = c("response_time_sbp_stnd", 
+                           "response_time_tchdl_stnd"),
+
+    individual_id = "id",
+    standardise_time = TRUE,
+    lme_control = nlme::lmeControl(maxIter = 100, msMaxIter = 100),
+
+    event_time = "event_time",
+    # replace with "event_status" for the competing risks models
+    event_status = "event_status_binary",
+    # replace with "cause_specific" or "fine_gray"
+    survival_submodel = "standard_cox",
+    b = 250
+  )
+```
+
+```{r}
+#| include: false
+#| message: false
+#| warning: false
+data_model_cs <-
+  fit_LME_landmark(
+    data_long = data_repeat_outcomes,
+    x_L = c(60),
+    x_hor = c(65),
+
+    predictors_LME = c("ethnicity", "smoking", "diabetes"),
+    predictors_LME_time = "response_time_sbp_stnd",
+    responses_LME = c("sbp_stnd", "tchdl_stnd"),
+    responses_LME_time = c("response_time_sbp_stnd", 
+                           "response_time_tchdl_stnd"),
+
+    individual_id = "id",
+    standardise_time = TRUE,
+    lme_control = nlme::lmeControl(maxIter = 100, msMaxIter = 100),
+
+    event_time = "event_time",
+    event_status = "event_status",
+    survival_submodel = "cause_specific",
+    b = 250
+  )
+```
+
+```{r}
+#| include: false
+#| message: false
+#| warning: false
+data_model_fg <-
+  fit_LME_landmark(
+    data_long = data_repeat_outcomes,
+    x_L = c(60),
+    x_hor = c(65),
+
+    predictors_LME = c("ethnicity", "smoking", "diabetes"),
+    predictors_LME_time = "response_time_sbp_stnd",
+    responses_LME = c("sbp_stnd", "tchdl_stnd"),
+    responses_LME_time = c("response_time_sbp_stnd", "response_time_tchdl_stnd"),
+
+    individual_id = "id",
+    standardise_time = TRUE,
+    lme_control = nlme::lmeControl(maxIter = 100, msMaxIter = 100),
+
+    event_time = "event_time",
+    event_status = "event_status",
+    survival_submodel = "fine_gray",
+    b = 250
+  )
+```
+
+
+## Results
+
+### Model Comparisons
+
+Four survival models were created using the Landmarking approach. One of them employed the LOCF technique in the first stage, and the Fine-Gray survival submodel in the second stage. The other three models used LME in the first stage, and the Cox, cause-specific, and the Fine-Gray models in the second stage. Treating non-CVD deaths as censored in the Cox and cause-specific models is likely to have violated the assumption of non-informative censoring, as the patients who died from non-CVD causes may have not been representative of those who were still at risk of CVD death [@wolkewitz:2014 ]. The Fine-Gray model avoids this issue by retaining competing risk individuals in the risk set.
+
+@fig-3 displays a dot plot with standard error bars of the Brier scores and c-index for the four models. The Cox model is shown in the plot for reference purposes only, as it cannot be directly compared with other models because it uses different event definitions. When comparing the two Fine-Gray models, we observe that the model that employed the LOCF method in the initial stage performed considerably worse, with a Brier score of 0.11 (SE = 0.006) and a c-index score of 0.647 (SE = 0.016). The Fine-Gray model with LME considerably outperformed it, with a Brier score of 0.087 (SE = 0.007) and a concordance index of 0.765 (SE = 0.017). On the other hand, the two competing risk models that employed the LME for the longitudinal model stage performed equally well, with similar results in both evaluation metrics. @fig-4 displays a calibration plot for the four landmark models, where the observed frequencies of the CVD deaths are plotted against the predicted probabilities of the CVD deaths.
+
+
+```{r}
+#| label: fig-3
+#| echo: false
+#| warning: false
+#| fig-cap: "Brier Score and C-Index Comparisons"
+pred_error <- list(
+  "Fine-Gray (LOCF)" = data_model_landmark_LOCF[["60"]][["prediction_error"]],
+  "Cause-Specific (LME)" = data_model_cs[["60"]][["prediction_error"]],
+  "Cox (LME)" = data_model_cox[["60"]][["prediction_error"]],
+  "Fine-Gray (LME)" = data_model_fg[["60"]][["prediction_error"]]
+) |>
+  map_dfr(as_tibble, .id = "model")
+
+pred_error |>
+  pivot_longer(c(c_index, brier_score), names_to = "metric", values_to = "value") |>
+  mutate(
+    se     = if_else(metric == "c_index", c_index_standard_error, brier_score_standard_error),
+    metric = recode(metric,
+      c_index     = "C-index (higher is better)",
+      brier_score = "Brier score (lower is better)")
+  ) |>
+  ggplot(aes(x = value, y = model, colour = model)) +
+  geom_point(size = 3) +
+  geom_errorbarh(aes(xmin = value - se, xmax = value + se), width = 0.3) +
+  facet_wrap(~ metric, scales = "free_x") +
+  labs(x = NULL, y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none",
+    strip.text         = element_text(face = "bold"),
+    panel.grid.minor   = element_blank(),
+    plot.caption       = element_text(colour = "grey50", size = 10),)
+```
+```{r}
+#| label: fig-4
+#| echo: false
+#| fig-cap: "Distribution of Predicted CVD Risk at Landmark Age 60"
+plot(
+  density(100 * data_model_landmark_LOCF[["60"]]$data$event_prediction),
+  xlab = "Predicted risk of CVD event (%)",
+  main = " ",
+  lwd = 2,
+  lty = 3,
+  col = "darkred"
+)
+
+lines(
+  density(100 * data_model_cs[["60"]]$data$event_prediction),
+  lwd = 3,
+  lty = 2,
+  col = "darkgreen"
+)
+
+lines(
+  density(100 * data_model_fg[["60"]]$data$event_prediction),
+  lwd = 3,
+  lty = 3,
+  col = "darkorange"
+)
+
+lines(
+  density(100 * data_model_cox[["60"]]$data$event_prediction),
+  lwd = 1.5,
+  lty = 1,
+  col = "blue"
+)
+
+
+legend(
+  "topright",
+  legend = c("Cox (LME)", "Cause-Specific (LME)", "Fine-Gray (LME)", "Fine-Gray (LOCF)"),
+  col = c("blue", "darkgreen", "darkorange", "darkred"),
+  lwd = 2,
+  lty = c(1, 2, 3, 3)
+)
+```
+
+### CVD Risk Prediction
+
+Participant 101, our hypothetical patient, is NZ Maori, a former smoker, diagnosed with diabetes. Due to their previous smoking behavior, and their diabetes diagnosis, it is expected that they have would display a high cardiovascular risk. In @tbl-3, the predicted 5-year CVD risk is shown for the four models. The risk was highest under the Cox model. At the landmark age of 60, their standardized SBP was 1, and their standardized TC/HDL ratio was 0.5, using the LOCF method. When the LME method was used, the estimated values were 0.007 and 0.363, which are considerably lower than those from the LOCF method. However, the LME variable accounts for the trajectory of the repeated measures, providing an advantage over the LCOF method. Since there are no individual trajectory estimates for the LOCF model, their respective random-slope values appear as missing data. The Fine-Gray (LOCF) model predicts a 39% probability of dying from CVD between the ages of 60 and 65, accounting for the competing risk of non-CVD death. This was the lowest predicted value, as the other models predicted probabilities above 45%, that were quite similar. For example, the Fine-Gray (LME) model predicted a 46% probability of dying from CVD between the ages of 60 and 65, accounting for the competing risk of non-CVD death, when the two biomarker values were derived from the LME-predicted trajectory at the landmark age 60 rather than the last observed value. Overall, the predicted risks of about 40% are incredibly high, which is in-line with the patient's medical history and past smoker status.
+
+
+```{r}
+#| label: tbl-3
+#| echo: false
+#| tbl-cap: "Predicted CVD Risk at Landmark Age 60 with 5-Year Horizon"
+list(
+  "Fine-Gray (LOCF)" = predict(object = data_model_landmark_LOCF, x_L = 60, x_hor = 65, newdata = newdata),
+  "Cause-Specific (LME)" = predict(object = data_model_cs, x_L = 60, x_hor = 65, newdata = newdata),
+  "Cox (LME)" = predict(object = data_model_cox, x_L = 60, x_hor = 65, newdata = newdata),
+  "Fine-Gray (LME)" = predict(object = data_model_fg, x_L = 60, x_hor = 65, newdata = newdata)
+) |>
+  map_dfr(as_tibble, .id = "Model") |>
+  select(-id, -ethnicity, -smoking, -diabetes) |>
+    kable(
+    col.names = c("Model", "SBP Value", "TC/HDL Value",
+                  "5-Year CVD Risk", "SBP Slope", "ETC/HDL Slope"),
+    digits    = 4,) |>
+  kable_styling(latex_options = c("hold_position"),
+                full_width    = FALSE,
+                font_size     = 7,
+                bootstrap_options = c("striped", "hover", "condensed")) |>
+  column_spec(1, bold = TRUE)
+```
+
+### Hazard Ratio Interpretation for the Fine-Gray LME model
+
+@tbl-5 contains the summary of the results of the Fine-Gray model when LME was employed for the longitudinal stage. According to the table, all four ethnic groups, NZ Maori, European, Pacific Islanders, and Indian, showed increased CVD risk when compared to the reference ethnicity group of Asian people. NZ Maori people had the highest hazard ratio at 2.09 (95% CI: 1.2, 3.64, p < 0.01), which means that they have twice the instantaneous rate of CVD death at any moment between the ages of 60 and 65 of people of Asian descent, followed by Pacific Islanders with 2.03 (95% CI: 1.12, 3.67, p < 0.02). Individuals with diabetes had a hazard ratio of 1.88 (95% CI: 1.4, 2.53, p < 0.00), which implies an 88% higher instantaneous rate of CVD compared to those without diabetes, after taking into consideration the other variables. Former and current smokers had an elevated risk compared to never smokers, with hazard ratios of 1.50 (95% CI: 1.11, 2.03, p < 0.01) and 1.80 (95% CI: 1.29, 2.49, p < 0.00), respectively. As expected, standardized SBP had a high hazard ratio of 1.10 (95% CI: 0.84, 1.46; P < 0.49), indicating that higher SBP scores at the landmark age of 60 are associated with higher CVD risk. However, this result was not statistically significant, so the null hypothesis that the hazard ratio is 1 cannot be rejected. On the other hand, the hazard ratio for standardized TC/HDL was statistically significant. Its value of 1.33 (95% CI: 1.09, 1.63, p < 0.01) implies that for every one-unit increase in the standardized ratio at the landmark age, the instantaneous CVD death rate increases by 33%, while accounting for the other covariates.
+
+
+```{r}
+#| label: tbl-5
+#| echo: false
+#| tbl-cap: "Summary of Fine-Gray Model with LME in Stage I"
+
+s <- data_model_fg[["60"]][["model_survival"]] |> summary()
+
+bind_cols(
+  s[["coef"]] |> as.data.frame(),
+  s[["conf.int"]]     |> as.data.frame() |> select(`2.5%`, `97.5%`)
+) |>
+  rownames_to_column("term") |>
+  mutate(
+    `95% CI` = paste0("(", round(`2.5%`, 2), ", ", round(`97.5%`, 2), ")")
+  ) |>
+  select(-`2.5%`, -`97.5%`) |>
+  kable(
+    col.names = c("Term", "Coefficient", "Hazard Ratio", "SE (Coefficient)", "Z-Score", "P-Value", "95% CI"),
+    digits    = 2
+  ) |>
+  kable_styling(latex_options = c("hold_position"),
+                full_width    = FALSE,
+                font_size     = 7,
+                bootstrap_options = c("striped", "hover", "condensed")) |>
+  column_spec(1, bold = TRUE, monospace = TRUE)
+```
+
+## Conclusion
+
+This paper applied the Landmarking R package developed by @barrott:2022 to a dataset obtained from primary care institutions inNew Zealand. The main purpose was to analyze the 5-year risk of CVD death at age 60 in the presence of competing risks, as well as the impact of different model features on the results. The LOCF method, as expected, performed notably worse than the LME method, displaying a much lower c-index and a higher Brier score. The LME method was optimal in this case, as not only was the simulated data generated using LME, but the LME model also identified realistic biomarkers by analyzing longitudinal trajectories of standardized SBP and TC/HDL while controlling for other predictors of interest. The LOCF method is the quicker option that requires fewer resources, and it would have worked better if the measurements had been recorded at shorter intervals, such as every couple of weeks, rather than over years.
+
+One possible reason our hypothesis that the cause-specific model would outperform the others didn't hold was that there weren't many competing risks observations in the first place; out of 3000 patients, only 33 experienced non-CVD deaths. The equation below, derived from the work of @putter:2020, provides some insight into how the results for the Fine-Gray and cause-specific model are similar. Since the cumulative incidence function is larger, because competing risks are low, the reduction factor, represented by the survival function divided by 1 minus the CIF, will be closer to 1. The closer the reduction factor is to 1, the more similar the two hazards.
+
+$$\tilde{\lambda}_c(t) = \frac{\lambda_c(t)S(t)}{1-F_c(t)}$$, where:
+
+- $\tilde{\lambda}_c(t)$ is the subdistribution hazard for cause $c$,
+- $\lambda_c(t)$ is the cause-specific hazard for cause $c$,
+- $S(t)$ is the survival function, representing the probability of not dying from any cause by time $t$,
+- $F_c(t)$ is the cumulative incidence function for cause $c$, representing the probability of dying from cause $c$ by time $t$.
+
+For the specific dataset and research question involving predicting an individual's CVD risk, the Fine-Gray model appears to be the best option. Using this survival submodel, we obtained results consistent with the patient's history.
+
+## References
+
+::: {#refs}
+:::
+
+
+## Acknowledgements
+
+Grammarly was used to resolve grammatical and clarity issues with the text. The AI function of Grammarly was not utilized. The integrated Gemini feature was automatically used when employing the Google search engine to look for references, R package questions and explanations for equations. However, everything that was learned through it was double-checked using the articles and blogs that were linked, along with the additional resources mentioned above. Nothing was procured solely with AI assistance.
+
