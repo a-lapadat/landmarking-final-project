@@ -1,4 +1,4 @@
-# **Introduction**  
+# **Description**  
 
   The survival analysis method this paper delves into is landmarking, which dynamically predicts an individual’s specific risk of an event occurring using continuously updated longitudinal data. In this type of analysis, landmark time points are established, and predictions are made solely using individuals at risk at those specific time points. 
   
